@@ -53,6 +53,10 @@ if not TELEGRAM_TOKEN or not GROQ_API_KEY:
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+# Cliente Groq SDK (para boletin.py y voice_processor.py)
+from groq import Groq as GroqClient
+groq_client = GroqClient(api_key=GROQ_API_KEY)
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
@@ -1032,7 +1036,7 @@ async def main():
     await start_web_server()
 
     # Arrancar scheduler (heartbeat, briefing, ritmo semanal, reprovisión)
-    init_scheduler(telegram_app.bot, call_groq)
+    init_scheduler(telegram_app.bot, call_groq, groq_client=groq_client)
     start_scheduler()
 
     logger.info("✅ Bot iniciado. Esperando mensajes...")

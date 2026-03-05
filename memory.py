@@ -507,15 +507,51 @@ def clear_memory(user_id: int):
 
 # ── Todos los usuarios (para scheduler) ──────────────────────
 
-def get_all_users() -> list[int]:
+def get_all_users() :
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM users")
             return [r[0] for r in cur.fetchall()]
 
 
-def get_all_google_users() -> list[int]:
+def get_all_google_users():
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM users WHERE google_tokens IS NOT NULL")
             return [r[0] for r in cur.fetchall()]
+
+
+# ── Tato Bot: Helpers síncronos para expedientes y términos ──
+
+def get_expedientes_sync(user_id: int) -> list:
+    """Lee los expedientes de Tato directamente de Postgres (sync)."""
+    user = get_user(user_id)
+    return user.get("expedientes", []) if user else []
+
+
+def save_expedientes_sync(user_id: int, expedientes: list) -> None:
+    """Guarda la lista de expedientes en Postgres (sync)."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET expedientes = %s::jsonb WHERE user_id = %s",
+                (json.dumps(expedientes, ensure_ascii=False), user_id),
+            )
+        conn.commit()
+
+
+def get_terminos_sync(user_id: int) -> list:
+    """Lee los términos procesales de Tato directamente de Postgres (sync)."""
+    user = get_user(user_id)
+    return user.get("terminos", []) if user else []
+
+
+def save_terminos_sync(user_id: int, terminos: list) -> None:
+    """Guarda la lista de términos en Postgres (sync)."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET terminos = %s::jsonb WHERE user_id = %s",
+                (json.dumps(terminos, ensure_ascii=False), user_id),
+            )
+        conn.commit()

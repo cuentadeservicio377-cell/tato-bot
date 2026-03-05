@@ -14,23 +14,28 @@ import tz_utils
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+import os
 import memory
 import google_services
 import workspace_memory
-
 import google_auth
+import expedientes as exp_module
+import terminos as term_module
+import boletin as boletin_module
 
 logger = logging.getLogger(__name__)
 
 # Bot global — se asigna desde bot.py al arrancar
 _bot = None
-_groq_fn = None  # función call_groq de bot.py
+_groq_fn = None      # función call_groq async de bot.py (para briefings)
+_groq_client = None  # cliente Groq SDK (para boletin.py y voice_processor.py)
 
-def init_scheduler(bot, call_groq_fn):
-    """Registra el bot y la función de Groq para usarlos en las tareas."""
-    global _bot, _groq_fn
+def init_scheduler(bot, call_groq_fn, groq_client=None):
+    """Registra el bot, la función de Groq y el cliente SDK para usarlos en las tareas."""
+    global _bot, _groq_fn, _groq_client
     _bot = bot
     _groq_fn = call_groq_fn
+    _groq_client = groq_client
 
 
 # ── Utilidades ────────────────────────────────────────────────
@@ -292,6 +297,162 @@ async def friday_wrap():
             logger.error(f"Error en wrap del viernes para {user_id}: {e}")
 
 
+# ── TATO BOT: Jobs legales ────────────────────────────────────
+
+async def boletin_diario():
+    """
+    Corre lunes-viernes a las 9:30 AM (hora México).
+    Busca el email de Gaceta de Información, parsea el PDF y envía
+    el resumen de acuerdos del día a Tato.
+    """
+    tato_id = int(os.getenv("TATO_USER_ID", "0"))
+    if not tato_id or not _bot:
+        logger.warning("[scheduler] boletin_diario: TATO_USER_ID no configurado o bot no listo")
+        return
+
+    logger.info("📋 Ejecutando boletin_diario...")
+    try:
+        # 1. Buscar email de Gaceta del día
+        email = await google_services.get_boletin_email_today(tato_id)
+        if not email:
+            await _bot.send_message(
+                chat_id=tato_id,
+                text="📋 Revisé el correo de Gaceta — no encontré el boletín de hoy todavía. Usa /boletin más tarde si ya llegó."
+            )
+            return
+
+        # 2. Descargar PDF adjunto
+        attachment_id = email.get("attachment_id")
+        if not attachment_id:
+            await _bot.send_message(
+                chat_id=tato_id,
+                text="⚠️ Encontré el email de Gaceta pero no tiene PDF adjunto."
+            )
+            return
+
+        pdf_bytes = await google_services.download_email_attachment(
+            tato_id, email["id"], attachment_id
+        )
+        if not pdf_bytes:
+            await _bot.send_message(
+                chat_id=tato_id,
+                text="⚠️ Encontré el email de Gaceta pero no pude descargar el PDF."
+            )
+            return
+
+        # 3. Extraer texto del PDF
+        pdf_text = boletin_module.extraer_texto_pdf(pdf_bytes)
+
+        # 4. Obtener expedientes activos (sync via memory.py)
+        todos = memory.get_expedientes_sync(tato_id)
+        expedientes_activos = [e for e in todos if e.get("estado", "activo") == "activo"]
+
+        # 5. Procesar con Groq SDK
+        if not _groq_client:
+            logger.error("[scheduler] _groq_client no inicializado")
+            return
+
+        acuerdos = await boletin_module.procesar_boletin_con_groq(
+            _groq_client, pdf_text, expedientes_activos
+        )
+
+        # 6. Aplicar actualizaciones de forma síncrona
+        from datetime import date, timedelta
+        import uuid
+        for acuerdo in acuerdos:
+            numero = acuerdo.get("numero_expediente")
+            if not numero:
+                continue
+            todos = memory.get_expedientes_sync(tato_id)
+            for i, exp in enumerate(todos):
+                if exp.get("numero", "").strip() == numero.strip():
+                    todos[i]["ultimo_acuerdo"] = date.today().isoformat()
+                    todos[i]["ultimo_acuerdo_texto"] = acuerdo.get("extracto_acuerdo", "")
+                    if acuerdo.get("dias_termino"):
+                        vence = (date.today() + timedelta(days=acuerdo["dias_termino"])).isoformat()
+                        todos[i]["proximo_termino"] = vence
+                        todos[i]["termino_fatal"] = acuerdo.get("termino_fatal", False)
+                        # Registrar término
+                        terminos = memory.get_terminos_sync(tato_id)
+                        terminos.append({
+                            "id": str(uuid.uuid4()),
+                            "expediente_numero": numero,
+                            "tipo": acuerdo.get("nuevo_termino") or "termino_procesal",
+                            "fatal": acuerdo.get("termino_fatal", False),
+                            "vence": vence,
+                            "resuelto": False,
+                        })
+                        memory.save_terminos_sync(tato_id, terminos)
+                    break
+            memory.save_expedientes_sync(tato_id, todos)
+
+            # Sincronizar a Sheets
+            exp_obj = next((e for e in todos if e.get("numero", "").strip() == numero.strip()), None)
+            if exp_obj and exp_obj.get("sheets_row"):
+                try:
+                    await google_services.update_sheets_expediente(tato_id, exp_obj)
+                except Exception as e:
+                    logger.error(f"[boletin] Sheets sync error para {numero}: {e}")
+
+        # 7. Enviar resumen
+        resumen = boletin_module.generar_resumen_boletin(acuerdos)
+        await _bot.send_message(chat_id=tato_id, text=resumen, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"[scheduler] Error en boletin_diario: {e}")
+        try:
+            await _bot.send_message(chat_id=tato_id, text=f"⚠️ Error procesando el boletín: {e}")
+        except Exception:
+            pass
+
+
+async def alertas_terminos():
+    """
+    Corre lunes-viernes a las 8:00 AM (hora México).
+    Revisa términos procesales próximos y envía alerta a Tato si hay urgentes.
+    """
+    from datetime import date
+    tato_id = int(os.getenv("TATO_USER_ID", "0"))
+    if not tato_id or not _bot:
+        return
+
+    logger.info("⏰ Ejecutando alertas_terminos...")
+    try:
+        hoy = date.today()
+        terminos = memory.get_terminos_sync(tato_id)
+        urgentes = {"hoy": [], "manana": [], "tres_dias": [], "sin_acuerdo": []}
+
+        for t in terminos:
+            if t.get("resuelto"):
+                continue
+            vence_str = t.get("vence")
+            if not vence_str:
+                continue
+            try:
+                from datetime import date as d_
+                vence = d_.fromisoformat(vence_str)
+                dias = (vence - hoy).days
+                if dias <= 0:
+                    urgentes["hoy"].append(t)
+                elif dias == 1:
+                    urgentes["manana"].append(t)
+                elif dias <= 3:
+                    urgentes["tres_dias"].append(t)
+            except ValueError:
+                pass
+
+        mensaje = term_module.generar_mensaje_alertas(urgentes)
+        if mensaje:
+            fecha_str = hoy.strftime("%d/%m/%Y")
+            await _bot.send_message(
+                chat_id=tato_id,
+                text=f"⏰ *Términos del día — {fecha_str}*\n\n{mensaje}",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"[scheduler] Error en alertas_terminos: {e}")
+
+
 # ── ARRANCAR EL SCHEDULER ─────────────────────────────────────
 
 async def nightly_doc_sync():
@@ -361,6 +522,22 @@ def start_scheduler() -> AsyncIOScheduler:
         id="nightly_doc_sync"
     )
 
+    # ── Tato Bot: Boletín diario ──────────────────────────────
+    # 9:30 AM lunes-viernes (hora Ciudad de México)
+    scheduler.add_job(
+        boletin_diario,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="America/Mexico_City"),
+        id="boletin_diario"
+    )
+
+    # ── Tato Bot: Alertas de términos procesales ──────────────
+    # 8:00 AM lunes-viernes antes del boletín
+    scheduler.add_job(
+        alertas_terminos,
+        CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone="America/Mexico_City"),
+        id="alertas_terminos"
+    )
+
     scheduler.start()
-    logger.info("✅ Scheduler iniciado — heartbeat, briefing, ritmo semanal activos")
+    logger.info("✅ Scheduler iniciado — heartbeat, briefing, boletín, alertas de términos activos")
     return scheduler
