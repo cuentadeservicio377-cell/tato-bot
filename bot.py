@@ -40,6 +40,23 @@ import identity as identity_module
 import skills as skills_engine
 from scheduler import start_scheduler, init_scheduler
 
+# ── Módulos legales Tato Bot ──────────────────────────────────
+import expedientes as exp_module
+import terminos as term_module
+import boletin as boletin_module
+from voice_processor import (
+    descargar_audio_telegram,
+    transcribir_audio,
+    extraer_actualizacion_juzgado,
+    formatear_confirmacion,
+)
+from google_services import (
+    get_boletin_email_today,
+    download_email_attachment,
+    update_sheets_expediente,
+    append_sheets_expediente,
+)
+
 # ── Configuración ────────────────────────────────────────────
 load_dotenv()
 
@@ -1005,6 +1022,277 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+# ── Comandos legales Tato Bot ─────────────────────────────────
+
+async def cmd_expedientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra todos los expedientes activos de Tato."""
+    user_id = update.effective_user.id
+    todos = memory.get_expedientes_sync(user_id)
+    activos = [e for e in todos if e.get("estado", "activo") == "activo"]
+    mensaje = await exp_module.format_expedientes_list(activos)
+    await update.message.reply_text(mensaje, parse_mode="Markdown")
+
+
+async def cmd_nuevo_expediente(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Registra un nuevo expediente. Acepta texto natural o el formato estructurado."""
+    user_id = update.effective_user.id
+    texto = " ".join(context.args) if context.args else ""
+
+    if not texto:
+        await update.message.reply_text(
+            "Dime los datos del nuevo expediente. Ejemplo:\n\n"
+            "`/nuevo_expediente 2-10 Primero Mercantil Carlos Álvarez mercantil`\n\n"
+            "O escríbeme en lenguaje natural y lo proceso.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Usar Groq para extraer los campos del texto libre
+    prompt = f"""Extrae datos de este expediente en JSON con estas claves:
+- numero: string (ej "2-10", "33")
+- juzgado: string
+- cliente: string
+- tipo: string (civil/mercantil/familiar/amparo/otro)
+- etapa: string (demanda/emplazamiento/pruebas/alegatos/sentencia/otro)
+
+Texto: {texto}
+Devuelve SOLO JSON, sin markdown."""
+
+    try:
+        resp = await call_groq(prompt, [], "")
+        import json as _json
+        datos = _json.loads(resp)
+    except Exception:
+        datos = {"numero": texto[:20], "juzgado": "Por definir", "cliente": "Por definir",
+                 "tipo": "otro", "etapa": "por definir"}
+
+    nuevo = await exp_module.add_expediente(None, user_id, datos)
+
+    # Si no hay db_pool async, usar sync
+    todos = memory.get_expedientes_sync(user_id)
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    datos["id"] = str(_uuid.uuid4())
+    datos.setdefault("estado", "activo")
+    datos["ultima_actualizacion"] = _dt.now().isoformat()
+    todos.append(datos)
+    memory.save_expedientes_sync(user_id, todos)
+
+    # Agregar a Sheets
+    try:
+        row_num = await append_sheets_expediente(user_id, datos)
+        # Guardar número de fila en el expediente
+        datos["sheets_row"] = row_num
+        memory.save_expedientes_sync(user_id, todos)
+        sheets_msg = f" y agregado a Sheets (fila {row_num})"
+    except Exception as e:
+        sheets_msg = f" (Sheets: {e})"
+
+    await update.message.reply_text(
+        f"✅ Expediente *{datos.get('numero', '?')}* registrado{sheets_msg}.",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_terminos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra los términos procesales vigentes ordenados por urgencia."""
+    user_id = update.effective_user.id
+    from datetime import date
+    hoy = date.today()
+    terminos = memory.get_terminos_sync(user_id)
+    urgentes = {"hoy": [], "manana": [], "tres_dias": [], "sin_acuerdo": []}
+
+    for t in terminos:
+        if t.get("resuelto"):
+            continue
+        vence_str = t.get("vence")
+        if not vence_str:
+            continue
+        try:
+            vence = date.fromisoformat(vence_str)
+            dias = (vence - hoy).days
+            if dias <= 0:
+                urgentes["hoy"].append(t)
+            elif dias == 1:
+                urgentes["manana"].append(t)
+            elif dias <= 3:
+                urgentes["tres_dias"].append(t)
+        except ValueError:
+            pass
+
+    mensaje = term_module.generar_mensaje_alertas(urgentes)
+    if not mensaje:
+        mensaje = "No tienes términos urgentes registrados."
+    await update.message.reply_text(mensaje, parse_mode="Markdown")
+
+
+async def cmd_boletin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dispara manualmente el procesamiento del boletín del día."""
+    user_id = update.effective_user.id
+    await update.message.reply_text("Buscando el boletín de Gaceta...")
+
+    try:
+        email = await get_boletin_email_today(user_id)
+        if not email:
+            await update.message.reply_text(
+                "No encontré el email de Gaceta de hoy. ¿Ya llegó el correo?"
+            )
+            return
+
+        attachment_id = email.get("attachment_id")
+        if not attachment_id:
+            await update.message.reply_text("Encontré el email pero no tiene PDF adjunto.")
+            return
+
+        pdf_bytes = await download_email_attachment(user_id, email["id"], attachment_id)
+        if not pdf_bytes:
+            await update.message.reply_text("No pude descargar el PDF.")
+            return
+
+        pdf_text = boletin_module.extraer_texto_pdf(pdf_bytes)
+        todos = memory.get_expedientes_sync(user_id)
+        expedientes_activos = [e for e in todos if e.get("estado", "activo") == "activo"]
+        acuerdos = await boletin_module.procesar_boletin_con_groq(
+            groq_client, pdf_text, expedientes_activos
+        )
+
+        # Aplicar actualizaciones
+        from datetime import date, timedelta
+        import uuid
+        for acuerdo in acuerdos:
+            numero = acuerdo.get("numero_expediente")
+            if not numero:
+                continue
+            todos = memory.get_expedientes_sync(user_id)
+            for i, exp in enumerate(todos):
+                if exp.get("numero", "").strip() == numero.strip():
+                    todos[i]["ultimo_acuerdo"] = date.today().isoformat()
+                    todos[i]["ultimo_acuerdo_texto"] = acuerdo.get("extracto_acuerdo", "")
+                    if acuerdo.get("dias_termino"):
+                        vence = (date.today() + timedelta(days=acuerdo["dias_termino"])).isoformat()
+                        todos[i]["proximo_termino"] = vence
+                        todos[i]["termino_fatal"] = acuerdo.get("termino_fatal", False)
+                        terminos = memory.get_terminos_sync(user_id)
+                        terminos.append({
+                            "id": str(uuid.uuid4()), "expediente_numero": numero,
+                            "tipo": acuerdo.get("nuevo_termino") or "termino_procesal",
+                            "fatal": acuerdo.get("termino_fatal", False),
+                            "vence": vence, "resuelto": False,
+                        })
+                        memory.save_terminos_sync(user_id, terminos)
+                    break
+            memory.save_expedientes_sync(user_id, todos)
+
+        resumen = boletin_module.generar_resumen_boletin(acuerdos)
+        await update.message.reply_text(resumen, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"Error procesando boletín: {e}")
+
+
+async def cmd_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista de pendientes del día: términos urgentes + expedientes con acción pendiente."""
+    user_id = update.effective_user.id
+    from datetime import date
+    hoy = date.today()
+    terminos = memory.get_terminos_sync(user_id)
+    urgentes = {"hoy": [], "manana": [], "tres_dias": [], "sin_acuerdo": []}
+    for t in terminos:
+        if t.get("resuelto"):
+            continue
+        try:
+            vence = date.fromisoformat(t["vence"])
+            dias = (vence - hoy).days
+            if dias <= 0:
+                urgentes["hoy"].append(t)
+            elif dias == 1:
+                urgentes["manana"].append(t)
+            elif dias <= 3:
+                urgentes["tres_dias"].append(t)
+        except (KeyError, ValueError):
+            pass
+
+    partes = []
+    msg_terminos = term_module.generar_mensaje_alertas(urgentes)
+    if msg_terminos:
+        partes.append(msg_terminos)
+
+    if not partes:
+        partes = ["Sin pendientes urgentes para hoy."]
+
+    await update.message.reply_text("\n".join(partes), parse_mode="Markdown")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa voice notes: transcribe con Whisper y extrae actualización de juzgado."""
+    user_id = update.effective_user.id
+    voice = update.message.voice
+    await update.message.reply_text("Procesando tu nota de voz...")
+
+    try:
+        # 1. Descargar audio
+        audio_bytes = await descargar_audio_telegram(context.bot, voice.file_id)
+
+        # 2. Transcribir con Groq Whisper
+        transcripcion = await transcribir_audio(groq_client, audio_bytes)
+        if not transcripcion:
+            await update.message.reply_text("No pude transcribir el audio. Intenta de nuevo.")
+            return
+
+        # 3. Extraer actualización estructurada
+        actualizacion = await extraer_actualizacion_juzgado(groq_client, transcripcion)
+
+        # 4. Si hay número de expediente, aplicar updates
+        numero = actualizacion.get("numero_expediente")
+        if numero:
+            todos = memory.get_expedientes_sync(user_id)
+            from datetime import datetime as _dt
+            for i, exp in enumerate(todos):
+                if exp.get("numero", "").strip() == numero.strip():
+                    if actualizacion.get("accion_realizada"):
+                        todos[i]["ultima_accion"] = actualizacion["accion_realizada"]
+                    if actualizacion.get("proximo_paso"):
+                        todos[i]["proximo_paso"] = actualizacion["proximo_paso"]
+                    if actualizacion.get("fecha_proxima"):
+                        todos[i]["proximo_termino"] = actualizacion["fecha_proxima"]
+                        todos[i]["termino_fatal"] = actualizacion.get("nuevo_termino_fatal", False)
+                    todos[i]["ultima_actualizacion"] = _dt.now().isoformat()
+                    memory.save_expedientes_sync(user_id, todos)
+
+                    # Sincronizar a Sheets
+                    if todos[i].get("sheets_row"):
+                        try:
+                            await update_sheets_expediente(user_id, todos[i])
+                        except Exception as e:
+                            logger.warning(f"[voice] Sheets sync error: {e}")
+
+                    # Registrar término si hay fecha nueva
+                    if actualizacion.get("fecha_proxima"):
+                        import uuid
+                        terminos = memory.get_terminos_sync(user_id)
+                        terminos.append({
+                            "id": str(uuid.uuid4()),
+                            "expediente_numero": numero,
+                            "tipo": "diligencia",
+                            "fatal": actualizacion.get("nuevo_termino_fatal", False),
+                            "vence": actualizacion["fecha_proxima"],
+                            "resuelto": False,
+                        })
+                        memory.save_terminos_sync(user_id, terminos)
+                    break
+
+        # 5. Confirmar
+        confirmacion = formatear_confirmacion(actualizacion)
+        await update.message.reply_text(
+            f"📝 *Transcripción:*\n_{transcripcion}_\n\n{confirmacion}",
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        logger.error(f"[voice] Error: {e}")
+        await update.message.reply_text(f"Error procesando nota de voz: {e}")
+
+
 # ── Arrancar todo ─────────────────────────────────────────────
 async def main():
     global telegram_app
@@ -1030,6 +1318,18 @@ async def main():
     telegram_app.add_handler(CommandHandler("evolucion", cmd_evolucion))
     telegram_app.add_handler(CommandHandler("nueva_skill", cmd_nueva_skill))
     telegram_app.add_handler(CommandHandler("mis_skills", cmd_mis_skills))
+
+    # ── Comandos legales Tato Bot ──────────────────────────────
+    telegram_app.add_handler(CommandHandler("expedientes",      cmd_expedientes))
+    telegram_app.add_handler(CommandHandler("nuevo_expediente", cmd_nuevo_expediente))
+    telegram_app.add_handler(CommandHandler("terminos",         cmd_terminos))
+    telegram_app.add_handler(CommandHandler("boletin",          cmd_boletin))
+    telegram_app.add_handler(CommandHandler("pendientes",       cmd_pendientes))
+
+    # Voice notes
+    telegram_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+    # Texto libre — debe ir ÚLTIMO
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Iniciar servidor web y bot en paralelo
