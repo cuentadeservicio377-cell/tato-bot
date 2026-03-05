@@ -35,7 +35,7 @@ import google_services
 import onboarding
 import workspace_memory
 import conversation_context
-import provisioning
+
 import identity as identity_module
 import skills as skills_engine
 from scheduler import start_scheduler, init_scheduler
@@ -63,8 +63,38 @@ logger = logging.getLogger(__name__)
 telegram_app = None
 
 # ── Prompt base ───────────────────────────────────────────────
-# System prompt cargado desde provisioning.py (versionado)
-BASE_SYSTEM_PROMPT = provisioning.get_current_system_prompt()
+BASE_SYSTEM_PROMPT = """Eres el asistente legal de Juan José Narváez (Tato), abogado litigante en Guadalajara, México.
+
+Tienes acceso a Google Workspace y puedes operar en su nombre.
+
+Puedes ayudar con:
+- 📋 Expedientes: consultar, actualizar y registrar casos activos
+- ⏰ Términos procesales: rastrear fechas límite, especialmente fatales
+- 📅 Google Calendar: agendar diligencias y audiencias
+- 📧 Gmail: revisar el boletín judicial diario de Gaceta de Información
+- 📊 Google Sheets: mantener el control de expedientes actualizado
+- 🎙️ Notas de voz: procesar actualizaciones dictadas desde juzgados
+
+Reglas:
+1. Responde siempre en español, tuteando a Tato.
+2. Cuando el usuario quiera realizar una acción de Google Workspace, responde con un bloque
+   JSON especial al FINAL de tu mensaje con este formato exacto:
+   [ACTION: {"service": "calendar|gmail|docs|sheets|drive", "action": "nombre_accion", "params": {...}}]
+3. Si el usuario no ha conectado Google, dile que use /conectar_google.
+4. Recuerda siempre lo que sabes del usuario y personaliza tus respuestas.
+5. Sé conciso y directo. Tato valora la eficiencia.
+6. Para términos fatales, siempre señálalos con MAYÚSCULAS o énfasis.
+7. Nunca inventes información — solo usa lo que está en su memoria.
+
+Acciones disponibles por servicio:
+- calendar: list_events, create_event, delete_event
+- gmail: list_emails, send_email, get_email
+- sheets: read, append, write
+- drive: list_files, search
+
+Al final de tu respuesta, si aprendiste algo nuevo:
+[FACT: descripción breve]
+"""
 
 
 # ── Llamada a Groq ────────────────────────────────────────────
@@ -576,7 +606,7 @@ async def start_web_server():
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra el catálogo de skills disponibles."""
     user_id = update.effective_user.id
-    catalog = provisioning.get_skills_catalog_text()
+    catalog = skills_engine.get_skills_catalog_text() if hasattr(skills_engine, 'get_skills_catalog_text') else "Skills disponibles en el catálogo base."
     active = memory.get_skills(user_id)
     active_names = [s["name"] for s in active]
 
@@ -602,7 +632,7 @@ async def cmd_activate_skill(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    skill = provisioning.find_skill_by_name(name)
+    skill = skills_engine.find_skill_by_name(name) if hasattr(skills_engine, 'find_skill_by_name') else None
     if not skill:
         await update.message.reply_text(
             f"No encontré una skill llamada '{name}'.\n"
@@ -628,7 +658,7 @@ async def cmd_deactivate_skill(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     name = " ".join(context.args) if context.args else ""
 
-    skill = provisioning.find_skill_by_name(name)
+    skill = skills_engine.find_skill_by_name(name) if hasattr(skills_engine, 'find_skill_by_name') else None
     if not skill:
         await update.message.reply_text("No encontre esa skill. Usa /skills para ver las activas.")
         return
@@ -961,15 +991,12 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_reprov = user.get("last_reprovisioned")
     last_str = str(last_reprov)[:16] if last_reprov else "nunca"
 
+    BOT_VERSION = "1.0.0-tato"
     msg = (
-        f"Bot v{provisioning.MANIFEST_VERSION} (sistema)\n"
-        f"Tu versión: v{user_version}\n"
+        f"Tato Bot v{BOT_VERSION}\n"
         f"Última actualización: {last_str}\n\n"
+        "Sistema activo y operando."
     )
-    if user_version != provisioning.MANIFEST_VERSION:
-        msg += "Hay una actualización pendiente — se aplicará automáticamente."
-    else:
-        msg += "Estás en la versión más reciente."
 
     await update.message.reply_text(msg)
 
@@ -1014,7 +1041,7 @@ async def main():
         await telegram_app.start()
 
         # Reprovisión al arrancar: actualizar usuarios con versión vieja
-        asyncio.create_task(provisioning.run_reprovisioning(memory, telegram_app.bot))
+        pass  # No reprovisioning needed for single-user bot
 
         await telegram_app.updater.start_polling()
         await asyncio.Event().wait()
