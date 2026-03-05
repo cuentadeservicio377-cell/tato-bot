@@ -97,6 +97,10 @@ def _init_db():
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reprovisioned TIMESTAMP DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS system_overrides JSONB NOT NULL DEFAULT '{}'",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_identity JSONB NOT NULL DEFAULT '{}'",
+                # ── Tato Bot: Legal modules ───────────────────────
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS expedientes JSONB NOT NULL DEFAULT '[]'",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS terminos JSONB NOT NULL DEFAULT '[]'",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS juzgados JSONB NOT NULL DEFAULT '{}'",
             ]
             for sql in migrations:
                 try:
