@@ -363,7 +363,7 @@ def save_google_tokens(user_id: int, tokens):
             conn.commit()
 
 
-def get_google_tokens(user_id: int) -> dict | None:
+def get_google_tokens(user_id: int):
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT google_tokens FROM users WHERE user_id = %s", (user_id,))

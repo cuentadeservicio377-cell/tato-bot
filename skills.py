@@ -237,7 +237,7 @@ async def evolve_skill(
     motivo: str,
     memory_module,
     call_groq_fn,
-) -> dict | None:
+):
     """
     Regenera el content_personal de una skill con la memoria más actual del usuario.
     Registra el cambio en evolution_log.
@@ -363,7 +363,7 @@ async def create_custom_skill(
     description: str,
     memory_module,
     call_groq_fn,
-) -> dict | None:
+):
     """
     El usuario describe en lenguaje natural qué quiere que haga la skill.
     Groq genera el contenido personalizado de la skill.

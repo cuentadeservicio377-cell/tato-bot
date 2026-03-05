@@ -232,7 +232,7 @@ def normalize_datetime_for_calendar(dt_str: str, tz_name: str) -> tuple[str, boo
     return dt_str, False
 
 
-def infer_tz_from_city(city: str) -> str | None:
+def infer_tz_from_city(city: str):
     """
     Infiere la timezone IANA a partir de una ciudad mencionada.
     Devuelve None si no la reconoce.

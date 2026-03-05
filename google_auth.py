@@ -88,7 +88,7 @@ async def refresh_access_token(refresh_token: str) -> dict:
         return response.json()
 
 
-async def get_valid_token(user_id: int) -> str | None:
+async def get_valid_token(user_id: int):
     """
     Devuelve un access_token válido para el usuario.
     Si expiró, lo renueva automáticamente con el refresh_token.

@@ -78,7 +78,7 @@ TONOS = {
 
 # ── MOTOR DE IDENTIDAD ────────────────────────────────────────
 
-def get_identity_for_user(bot_identity: dict | None) -> dict:
+def get_identity_for_user(bot_identity: dict) -> dict:
     """
     Devuelve la identidad efectiva para un usuario.
     Si el usuario tiene personalización activa, la combina con la global.
@@ -94,7 +94,7 @@ def get_identity_for_user(bot_identity: dict | None) -> dict:
     return effective
 
 
-def build_identity_block(bot_identity: dict | None, user_nombre: str = "") -> str:
+def build_identity_block(bot_identity: dict, user_nombre: str = "") -> str:
     """
     Construye el bloque de identidad que va al inicio del system prompt.
     Define quién ES el asistente y cómo debe comportarse con este usuario específico.
@@ -129,7 +129,7 @@ def build_identity_block(bot_identity: dict | None, user_nombre: str = "") -> st
     return "\n".join(lines)
 
 
-def get_greeting(bot_identity: dict | None, user_nombre: str = "") -> str:
+def get_greeting(bot_identity: dict, user_nombre: str = "") -> str:
     """
     Devuelve un saludo personalizado para el usuario conocido.
     Varía el saludo para que no sea siempre igual.
@@ -146,7 +146,7 @@ def get_greeting(bot_identity: dict | None, user_nombre: str = "") -> str:
         return random.choice(frases)
 
 
-def get_new_user_greeting(bot_identity: dict | None = None) -> str:
+def get_new_user_greeting(bot_identity: dict = None) -> str:
     """Saludo para usuario nuevo al iniciar onboarding."""
     identity = get_identity_for_user(bot_identity)
     nombre_asistente = identity["nombre"]
@@ -156,7 +156,7 @@ def get_new_user_greeting(bot_identity: dict | None = None) -> str:
     return base.replace("Luma", nombre_asistente)
 
 
-def describe_identity(bot_identity: dict | None) -> str:
+def describe_identity(bot_identity: dict) -> str:
     """
     Texto legible para /mi_asistente — muestra la identidad actual del usuario.
     """

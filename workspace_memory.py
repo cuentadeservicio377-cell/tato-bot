@@ -57,7 +57,7 @@ async def bootstrap_existing_user(user_id: int):
     logger.info(f"Bootstrapping workspace doc para usuario existente {user_id}")
     await sync_memory_to_doc(user_id)
 
-async def get_or_create_memory_doc(user_id: int) -> str | None:
+async def get_or_create_memory_doc(user_id: int):
     """
     Devuelve el doc_id del documento de memoria del usuario.
     Si no existe, lo crea y guarda el ID en preferencias.
@@ -111,7 +111,7 @@ async def _doc_exists(user_id: int, doc_id: str) -> bool:
         return False
 
 
-async def _find_doc_in_drive(user_id: int, title: str) -> str | None:
+async def _find_doc_in_drive(user_id: int, title: str):
     """Busca un documento por título exacto en Drive."""
     try:
         token = await get_valid_token(user_id)
@@ -132,7 +132,7 @@ async def _find_doc_in_drive(user_id: int, title: str) -> str | None:
         return None
 
 
-async def _create_memory_doc(user_id: int, title: str, nombre: str) -> str | None:
+async def _create_memory_doc(user_id: int, title: str, nombre: str):
     """Crea el documento de memoria con estructura inicial."""
     try:
         token = await get_valid_token(user_id)
@@ -179,7 +179,7 @@ async def _create_memory_doc(user_id: int, title: str, nombre: str) -> str | Non
 
 # ── Leer memoria del Doc ──────────────────────────────────────
 
-async def read_memory_doc(user_id: int) -> str | None:
+async def read_memory_doc(user_id: int):
     """
     Lee el contenido del documento de memoria.
     Devuelve el texto plano o None si no hay doc o hay error.

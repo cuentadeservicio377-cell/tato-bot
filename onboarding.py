@@ -196,7 +196,7 @@ Si el usuario dijo algo como "así está bien" o "no cambies nada", devuelve:
 ]
 
 
-def get_current_step(user_id: int) -> dict | None:
+def get_current_step(user_id: int):
     """Devuelve el paso actual del onboarding, o None si terminó."""
     state = memory.get_onboarding_state(user_id)
     step_index = state.get("step", 0)

@@ -430,3 +430,163 @@ async def get_doc_content(user_id: int, doc_id: str = "", **kwargs) -> str:
             for para in element.get("paragraph", {}).get("elements", []):
                 text += para.get("textRun", {}).get("content", "")
         return text.strip()
+
+
+# ════════════════════════════════════════════════════════════
+# TATO BOT — Funciones legales: Boletín y Expedientes
+# ════════════════════════════════════════════════════════════
+
+import os
+from datetime import date
+
+
+async def get_boletin_email_today(user_id: int):
+    """
+    Busca en Gmail el email de Gaceta de Información del día de hoy.
+    Retorna dict con id, subject, from, attachment_id (del PDF), o None si no encontró.
+    """
+    sender = os.getenv("GACETA_EMAIL_SENDER", "")
+    hoy = date.today().strftime("%Y/%m/%d")
+    query = f"from:{sender} after:{hoy}" if sender else f"subject:gaceta after:{hoy}"
+
+    token = await get_valid_token(user_id)
+    async with httpx.AsyncClient() as client:
+        # Buscar emails
+        r = await client.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"maxResults": 1, "q": query},
+        )
+        r.raise_for_status()
+        messages = r.json().get("messages", [])
+        if not messages:
+            return None
+
+        msg_id = messages[0]["id"]
+
+        # Obtener metadata + partes del mensaje para encontrar el PDF
+        r2 = await client.get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"format": "full"},
+        )
+        r2.raise_for_status()
+        data = r2.json()
+
+        # Extraer attachment_id del PDF adjunto
+        attachment_id = None
+        parts = data.get("payload", {}).get("parts", [])
+        for part in parts:
+            if part.get("mimeType") == "application/pdf" or part.get("filename", "").endswith(".pdf"):
+                attachment_id = part.get("body", {}).get("attachmentId")
+                break
+
+        hdrs = {h["name"]: h["value"] for h in data.get("payload", {}).get("headers", [])}
+
+        return {
+            "id": msg_id,
+            "subject": hdrs.get("Subject", ""),
+            "from": hdrs.get("From", ""),
+            "date": hdrs.get("Date", ""),
+            "attachment_id": attachment_id,
+        }
+
+
+async def download_email_attachment(user_id: int, message_id: str, attachment_id: str):
+    """
+    Descarga el PDF adjunto de un email de Gmail.
+    Retorna bytes del PDF o None si falla.
+    """
+    import base64
+    token = await get_valid_token(user_id)
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/attachments/{attachment_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        r.raise_for_status()
+        data = r.json().get("data", "")
+        if not data:
+            return None
+        return base64.urlsafe_b64decode(data + "==")
+
+
+async def update_sheets_expediente(user_id: int, expediente: dict) -> None:
+    """
+    Actualiza la fila de un expediente en Google Sheets.
+    Requiere que expediente tenga 'sheets_row' (número de fila, ej: 2).
+    Columnas A-L según estructura definida en el plan.
+    """
+    sheet_id = os.getenv("SHEETS_EXPEDIENTES_ID", "")
+    row = expediente.get("sheets_row", 2)
+    range_name = f"A{row}:L{row}"
+
+    values = [[
+        expediente.get("numero", ""),
+        expediente.get("juzgado", ""),
+        expediente.get("cliente", ""),
+        expediente.get("tipo", ""),
+        expediente.get("etapa", ""),
+        expediente.get("ultimo_acuerdo", ""),
+        expediente.get("ultimo_acuerdo_texto", ""),
+        expediente.get("proximo_termino", ""),
+        "SÍ" if expediente.get("termino_fatal") else "NO",
+        expediente.get("estado", "activo"),
+        expediente.get("notas", ""),
+        expediente.get("ultima_actualizacion", ""),
+    ]]
+
+    token = await get_valid_token(user_id)
+    async with httpx.AsyncClient() as client:
+        r = await client.put(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"valueInputOption": "USER_ENTERED"},
+            json={"values": values},
+        )
+        r.raise_for_status()
+
+
+async def append_sheets_expediente(user_id: int, expediente: dict) -> int:
+    """
+    Agrega un expediente como nueva fila en Google Sheets.
+    Retorna el número de fila asignado.
+    """
+    sheet_id = os.getenv("SHEETS_EXPEDIENTES_ID", "")
+    range_name = os.getenv("SHEETS_EXPEDIENTES_RANGE", "Expedientes!A:L")
+
+    values = [[
+        expediente.get("numero", ""),
+        expediente.get("juzgado", ""),
+        expediente.get("cliente", ""),
+        expediente.get("tipo", ""),
+        expediente.get("etapa", ""),
+        expediente.get("ultimo_acuerdo", ""),
+        expediente.get("ultimo_acuerdo_texto", ""),
+        expediente.get("proximo_termino", ""),
+        "SÍ" if expediente.get("termino_fatal") else "NO",
+        expediente.get("estado", "activo"),
+        expediente.get("notas", ""),
+        expediente.get("ultima_actualizacion", ""),
+    ]]
+
+    token = await get_valid_token(user_id)
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_name}:append",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"valueInputOption": "USER_ENTERED"},
+            json={"values": values},
+        )
+        r.raise_for_status()
+        result = r.json()
+
+    # Extraer número de fila del rango actualizado
+    updated_range = result.get("updates", {}).get("updatedRange", "")
+    try:
+        # Formato: "Expedientes!A3:L3" → extraer 3
+        row_part = updated_range.split("!")[1] if "!" in updated_range else updated_range
+        row_num = int("".join(filter(str.isdigit, row_part.split(":")[0])))
+    except Exception:
+        row_num = 2
+    return row_num
