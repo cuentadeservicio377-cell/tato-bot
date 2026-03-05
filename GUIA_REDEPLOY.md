@@ -1,222 +1,212 @@
-# Guía de Redeploy — Asistente Personal Monday
+# Guía de Deploy y Mantenimiento — Tato Bot
 
-## Regla de oro
-
-**Un solo archivo controla todo el comportamiento base del bot: `provisioning.py`.**
-
-Cualquier cambio que quieras propagar a todos los usuarios — nuevas habilidades,
-nuevo tono, nuevo prompt, nuevas preguntas de onboarding — se hace en ese archivo.
-Los datos personales de cada usuario (memoria, proyectos, metas, etc.) nunca se tocan.
+Bot de asistencia legal para Tato (Juan José Narváez Palacios).
+Fork exclusivo de monday-bot adaptado para litigio en Guadalajara, MX.
 
 ---
 
-## Tipos de cambio y qué hacer en cada caso
+## Primera vez: Configurar en Railway
 
-### Tipo A — Cambio de comportamiento (prompt, tono, instrucciones)
+### Paso 1 — Crear proyecto en Railway
 
-Ejemplo: quieres que el bot sea más proactivo, o que siempre responda en bullet points.
+1. Ir a [railway.app](https://railway.app) → **New Project**
+2. **Deploy from GitHub repo** → seleccionar `tato-bot`
+3. Railway detecta `railway.toml` automáticamente
 
-1. Abre `provisioning.py`
-2. Edita el bloque `SYSTEM_PROMPT`
-3. Incrementa `MANIFEST_VERSION` en MINOR: `"1.0.0"` → `"1.1.0"`
-4. Agrega entrada al `CHANGELOG`:
+### Paso 2 — Agregar PostgreSQL
 
-```python
-"1.1.0": {
-    "titulo": "Respuestas más proactivas",
-    "cambios": [
-        "El asistente ahora sugiere acciones antes de que las pidas",
-        "Respuestas en formato más visual con emojis y estructura",
-    ],
-    "accion_requerida": None,
-},
+1. En el proyecto Railway: **+ New** → **Database** → **Add PostgreSQL**
+2. Railway inyecta `DATABASE_URL` automáticamente en el servicio
+
+### Paso 3 — Variables de entorno
+
+En Railway → tu servicio → **Variables**, agregar:
+
+```
+# Telegram
+TELEGRAM_TOKEN=<token de @BotFather>
+
+# Groq
+GROQ_API_KEY=<api key de console.groq.com>
+
+# Google OAuth
+GOOGLE_CLIENT_ID=<client id de Google Cloud Console>
+GOOGLE_CLIENT_SECRET=<client secret>
+CALLBACK_URL=https://<tu-dominio>.railway.app/oauth/callback
+RAILWAY_PUBLIC_URL=https://<tu-dominio>.railway.app
+PORT=8080
+
+# ---- Específico Tato Bot ----
+TATO_USER_ID=<tu Telegram user ID — usa @userinfobot para saber>
+GACETA_EMAIL_SENDER=<email desde el que llega Gaceta de Información>
+SHEETS_EXPEDIENTES_ID=<ID de la Google Sheet de control>
+SHEETS_EXPEDIENTES_RANGE=Expedientes!A:L
 ```
 
-5. `git add . && git commit -m "v1.1.0 prompt más proactivo" && git push`
+> El `DATABASE_URL` no hay que agregarlo — Railway lo inyecta solo al tener Postgres.
 
-**Qué pasa automáticamente:**
-- Railway redeploya en ~2 minutos
-- Al arrancar, detecta usuarios con versión `< 1.1.0`
-- Les envía una notificación con el changelog
-- Marca su `bot_version = "1.1.0"` en la DB
-- Su memoria personal no se toca
+### Paso 4 — Dominio público (para OAuth)
 
----
+En Railway → tu servicio → **Settings** → **Networking** → **Generate Domain**
 
-### Tipo B — Nueva skill disponible
+Copiar ese dominio y actualizar `CALLBACK_URL` y `RAILWAY_PUBLIC_URL`.
 
-Ejemplo: agregas una skill de "Análisis de correos" o "Planificación semanal".
+### Paso 5 — Deploy
 
-1. Abre `provisioning.py`
-2. Agrega la skill al array `SKILLS_CATALOG`:
-
-```python
-{
-    "id": "email_analysis",
-    "name": "Análisis de correos",
-    "description": "Resumir y priorizar correos importantes",
-    "content": (
-        "Cuando el usuario pida analizar correos, clasifícalos por urgencia "
-        "e identifica los que requieren respuesta hoy."
-    ),
-    "trigger": "manual",
-    "emoji": "🔍",
-    "version_added": "1.2.0",
-},
+Railway hace deploy automático al conectar el repo.
+Verificar en **Logs**:
+```
+Bot started
+Scheduler started
 ```
 
-3. Incrementa `MANIFEST_VERSION`: `"1.1.0"` → `"1.2.0"`
-4. Agrega al `CHANGELOG`
-5. `git push`
-
-**La skill queda disponible en el catálogo para todos.**
-Los usuarios la activan con `/activar_skill análisis de correos`.
-Las skills que ya tenían activadas no se tocan.
+Si ves errores de migración de DB, son normales en el primer arranque — el bot crea las tablas automáticamente.
 
 ---
 
-### Tipo C — Corrección menor (typo, ajuste de texto)
+## Primera sesión desde Telegram
 
-Sin impacto en comportamiento, no hay que notificar a usuarios.
+1. Buscar el bot por su username
+2. Enviar `/start` → comenzará el onboarding (nombre, zona horaria, etc.)
+3. Al terminar onboarding, conectar Google: seguir el link OAuth que envía el bot
+4. Verificar con `/expedientes` → debe responder (lista vacía al inicio)
 
-1. Haz el cambio donde sea necesario
-2. Incrementa solo el PATCH: `"1.2.0"` → `"1.2.1"`
-3. En el CHANGELOG, pon cambios mínimos:
+---
 
-```python
-"1.2.1": {
-    "titulo": "Correcciones menores",
-    "cambios": ["Ajustes de texto en mensajes del bot"],
-    "accion_requerida": None,
-},
+## Estructura de archivos clave
+
+```
+bot.py              ← Punto de entrada. Handlers de Telegram.
+scheduler.py        ← Jobs automáticos (boletín 9:30am, alertas 8:00am)
+memory.py           ← Schema DB + funciones sync para scheduler
+expedientes.py      ← CRUD de casos legales (async)
+terminos.py         ← Gestión de términos procesales (async)
+boletin.py          ← Procesamiento del PDF de Gaceta de Información
+voice_processor.py  ← Notas de voz → transcripción Whisper → update expediente
+google_services.py  ← Gmail (boletín), Sheets (expedientes), OAuth
+railway.toml        ← Configuración de deploy
+.env.example        ← Referencia de variables de entorno
+SHEETS_SETUP.md     ← Instrucciones para configurar la Google Sheet
 ```
 
-4. `git push`
+---
 
-Los usuarios reciben la notificación pero es breve y no requiere ninguna acción.
+## Google Sheets — Configurar el control de expedientes
+
+Ver instrucciones detalladas en `SHEETS_SETUP.md`.
+
+Resumen: crear una hoja llamada `Expedientes` con columnas A-L, copiar el ID
+del URL (`docs.google.com/spreadsheets/d/**ID**/edit`) y pegarlo en `SHEETS_EXPEDIENTES_ID`.
 
 ---
 
-### Tipo D — Cambio de base de datos (nueva columna)
+## Comandos del bot
 
-Ejemplo: agregas una nueva columna a la tabla `users`.
+| Comando | Función |
+|---|---|
+| `/expedientes` | Ver lista de expedientes activos |
+| `/nuevo_expediente` | Registrar un expediente nuevo |
+| `/terminos` | Ver términos urgentes (hoy, mañana, próximos 3 días) |
+| `/boletin` | Procesar el boletín de hoy manualmente |
+| `/pendientes` | Lista de pendientes ordenada por urgencia |
+| `/start` | Iniciar o reiniciar el onboarding |
+| `/conectar_google` | Reconectar cuenta de Google |
 
-1. Agrega la columna en el bloque `CREATE TABLE IF NOT EXISTS` de `memory.py`
-2. Agrega la migración en el array `migrations` del mismo archivo:
+**Voz:** Enviar una nota de voz desde juzgados → el bot transcribe, extrae el expediente
+y el acuerdo, actualiza la DB y sincroniza a Sheets.
+
+---
+
+## Jobs automáticos
+
+| Job | Horario | Función |
+|---|---|---|
+| `boletin_diario` | 9:30 AM lun-vie (CDMX) | Busca email de Gaceta → descarga PDF → procesa → envía resumen |
+| `alertas_terminos` | 8:00 AM lun-vie (CDMX) | Revisa términos urgentes → alerta si hay vencimientos hoy/mañana |
+
+---
+
+## Cómo hacer cambios al comportamiento del bot
+
+### Cambiar el prompt del asistente
+
+En `bot.py`, buscar `BASE_SYSTEM_PROMPT` y editar el texto.
+
+```bash
+git add bot.py
+git commit -m "update: ajustar prompt del asistente"
+git push
+```
+
+Railway redeploya automáticamente en ~2 minutos.
+
+### Agregar un nuevo comando
+
+1. Crear la función `async def cmd_nuevo(update, context)` en `bot.py`
+2. Registrar en `main()`:
+   ```python
+   app.add_handler(CommandHandler("nuevo", cmd_nuevo))
+   ```
+3. Commit y push
+
+### Cambiar el horario de los jobs
+
+En `scheduler.py`, buscar `CronTrigger` y modificar `hour`/`minute`:
+
+```python
+# Cambiar boletín a 10:00 AM
+scheduler.add_job(boletin_diario, CronTrigger(
+    day_of_week="mon-fri", hour=10, minute=0,
+    timezone="America/Mexico_City"
+), id="boletin_diario")
+```
+
+### Agregar columna a la DB
+
+En `memory.py`, agregar al array `migrations`:
 
 ```python
 "ALTER TABLE users ADD COLUMN IF NOT EXISTS nueva_columna JSONB DEFAULT '{}'",
 ```
 
-3. El `ALTER TABLE ... IF NOT EXISTS` se ejecuta al arrancar — nunca falla
-   si la columna ya existe, y no toca datos existentes
-4. No necesariamente requiere incrementar `MANIFEST_VERSION`
-   a menos que el comportamiento cambie para el usuario
+El bot aplica la migración automáticamente al arrancar. No hay que hacer nada más.
 
 ---
 
-### Tipo E — Cambio de onboarding (nuevas preguntas)
+## Reconectar Google OAuth
 
-> ⚠️ Afecta solo a usuarios nuevos. Los que ya completaron el onboarding no lo ven.
+Si los tokens expiran o se revocan:
 
-1. Edita `ONBOARDING_STEPS` en `onboarding.py`
-2. Incrementa `ONBOARDING_VERSION` en `provisioning.py`
-3. Si es un cambio MAJOR que quieres aplicar a todos:
-   - Incrementa la versión MAJOR: `"1.x.x"` → `"2.0.0"`
-   - En `run_reprovisioning()`, agrega lógica para marcar `onboarding_done = False`
-     solo si el cambio lo justifica (raro — solo en rediseños totales)
+1. Enviar `/conectar_google` desde Telegram
+2. Seguir el link y autorizar de nuevo
+3. El bot confirma la reconexión
 
 ---
 
-## Flujo completo de un redeploy normal
+## Verificar que todo funciona
 
-```
-1. Edita provisioning.py
-   ├── MANIFEST_VERSION = "X.Y.Z"  ← incrementar
-   ├── CHANGELOG["X.Y.Z"] = {...}  ← describir cambio
-   └── SYSTEM_PROMPT o SKILLS_CATALOG ← el cambio real
+```bash
+# Desde Telegram:
+/expedientes   → responde (lista o mensaje vacío)
+/terminos      → responde
+/pendientes    → responde
 
-2. git add provisioning.py
-   git commit -m "vX.Y.Z descripción del cambio"
-   git push
-
-3. Railway detecta el push → redeploya automáticamente (~2 min)
-
-4. Al arrancar bot.py → llama provisioning.run_reprovisioning()
-   ├── Lee todos los user_ids de PostgreSQL
-   ├── Por cada usuario con bot_version < "X.Y.Z":
-   │   ├── Envía notificación en Telegram con el changelog
-   │   ├── Actualiza bot_version en DB
-   │   └── NO toca ningún dato personal
-   └── Log: "X actualizados, Y errores de Z usuarios"
-
-5. Cada domingo 3am → weekly_reprovisioning() corre como respaldo
-   (por si alguien no estaba activo cuando se desplegó)
+# En Railway Logs:
+# Buscar: "Bot started", "Scheduler started"
+# No debe haber errores de importación ni de DB
 ```
 
 ---
 
-## Qué NUNCA hace la reprovisión
+## Tests
 
-| Dato del usuario | ¿Lo toca? |
-|-----------------|-----------|
-| identidad (nombre, ubicación) | ❌ Nunca |
-| trabajo, proyectos, metas | ❌ Nunca |
-| relaciones, ritmo, preferencias | ❌ Nunca |
-| hechos aprendidos en conversación | ❌ Nunca |
-| historial de conversación | ❌ Nunca |
-| tokens de Google (OAuth) | ❌ Nunca |
-| skills que el usuario activó | ❌ Nunca |
-| onboarding_done (si ya lo hizo) | ❌ Nunca* |
-| Google Doc de memoria | ❌ Nunca |
-
-*Solo en versiones MAJOR con cambio explícito de `onboarding_done`
-
----
-
-## Comandos útiles post-deploy
-
-Desde Telegram, como usuario:
-```
-/version    → ver qué versión tienes vs. la del sistema
-/skills     → ver catálogo actualizado de skills
-/memoria    → confirmar que tu memoria está intacta
-```
-
-En Railway logs, buscar:
-```
-Reprovisión completa: X/Y actualizados
+```bash
+cd tato-bot
+source venv/bin/activate
+pytest tests/ -v
+# Esperado: 36 passed
 ```
 
 ---
 
-## Referencia rápida de versioning
-
-```
-MAJOR.MINOR.PATCH
-
-MAJOR → cambio radical de comportamiento, nuevo onboarding para todos
-        ejemplo: 1.0.0 → 2.0.0
-
-MINOR → nueva funcionalidad, nuevas skills, cambio de prompt
-        ejemplo: 1.0.0 → 1.1.0
-
-PATCH → corrección de texto, ajuste sin impacto en comportamiento
-        ejemplo: 1.0.0 → 1.0.1
-```
-
----
-
-## Estructura de archivos del sistema
-
-```
-provisioning.py    ← ÚNICA fuente de verdad del comportamiento base
-memory.py          ← Schema DB + funciones de versión
-bot.py             ← Carga prompt desde provisioning, dispara reprovisión al arrancar
-scheduler.py       ← Reprovisión semanal como respaldo (domingos 3am)
-onboarding.py      ← Pasos de entrevista (versionados por ONBOARDING_VERSION)
-skills.py          ← YA NO SE USA DIRECTAMENTE — todo va por provisioning.py
-```
-
-> **Nota:** `skills.py` quedó obsoleto. El catálogo de skills ahora vive
-> en `provisioning.SKILLS_CATALOG`. Puedes eliminarlo o mantenerlo como referencia.
+*Tato Bot v1.0 — 2026-03-05*
