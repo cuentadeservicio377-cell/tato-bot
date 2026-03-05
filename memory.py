@@ -555,3 +555,34 @@ def save_terminos_sync(user_id: int, terminos: list) -> None:
                 (json.dumps(terminos, ensure_ascii=False), user_id),
             )
         conn.commit()
+
+
+def get_sheets_id(user_id: int) -> str:
+    """Lee el spreadsheet ID guardado en juzgados._config para este usuario."""
+    user = get_user(user_id)
+    if not user:
+        return ""
+    juzgados = user.get("juzgados") or {}
+    if isinstance(juzgados, str):
+        import json as _json
+        try:
+            juzgados = _json.loads(juzgados)
+        except Exception:
+            return ""
+    return juzgados.get("_config", {}).get("sheets_id", "")
+
+
+def save_sheets_id(user_id: int, sheet_id: str) -> None:
+    """Guarda el spreadsheet ID en juzgados._config para este usuario."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE users
+                   SET juzgados = jsonb_set(
+                       COALESCE(juzgados, '{}'), '{_config}',
+                       %s::jsonb, true
+                   )
+                   WHERE user_id = %s""",
+                (json.dumps({"sheets_id": sheet_id}, ensure_ascii=False), user_id),
+            )
+        conn.commit()

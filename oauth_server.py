@@ -8,10 +8,13 @@ y los guarda en PostgreSQL.
 """
 
 import asyncio
+import logging
 from aiohttp import web
 from google_auth import exchange_code_for_tokens
 from datetime import datetime, timedelta
 import memory
+
+logger = logging.getLogger(__name__)
 
 # El bot de Telegram para poder notificar al usuario
 _bot = None
@@ -52,21 +55,44 @@ async def oauth_callback(request: web.Request) -> web.Response:
         # Guardar tokens en PostgreSQL
         memory.save_google_tokens(int(user_id), tokens)
 
+        # Setup automático de Google Sheets si es la primera vez
+        sheet_url = ""
+        existing_id = memory.get_sheets_id(int(user_id))
+        if not existing_id:
+            try:
+                from google_services import setup_sheets_for_user
+                sheet_id = await setup_sheets_for_user(int(user_id))
+                sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+                logger.info("[oauth] Sheets creado: %s para user_id=%s", sheet_id, user_id)
+            except Exception as e:
+                logger.error("[oauth] Error creando Sheets: %s", e)
+
         # Notificar al usuario en Telegram
         if _bot:
+            expedientes = memory.get_expedientes_sync(int(user_id))
+            n_exp = len(expedientes)
+            n_activos = sum(1 for e in expedientes if e.get("estado", "activo") == "activo")
+
+            sheets_line = (
+                f"\n📊 Hoja de control creada: [Abrir Sheets]({sheet_url})\n"
+                f"   {n_exp} expedientes cargados ({n_activos} activos)"
+                if sheet_url else "\n📊 Google Sheets disponible"
+            )
+
             await _bot.send_message(
                 chat_id=int(user_id),
                 text=(
-                    "✅ ¡Google conectado exitosamente!\n\n"
+                    "✅ *¡Google conectado exitosamente!*\n\n"
                     "Ya puedo acceder a:\n"
                     "📅 Google Calendar\n"
                     "📧 Gmail\n"
                     "📝 Google Docs\n"
                     "📁 Google Drive\n"
-                    "📊 Google Sheets\n\n"
-                    "Prueba diciéndome: *¿qué eventos tengo hoy?*"
+                    f"{sheets_line}\n\n"
+                    "Prueba enviando una nota de voz desde juzgados."
                 ),
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
 
         return web.Response(

@@ -60,6 +60,11 @@ async def test_add_expediente_assigns_id():
     result = await add_expediente(pool, USER_ID, nuevo)
     assert "id" in result
     assert result["estado"] == "activo"
+    # Nuevos campos con defaults
+    assert "juzgado_codigo" in result
+    assert "partes" in result
+    assert "monto" in result
+    assert "proximo_paso" in result
     conn.execute.assert_called_once()
 
 

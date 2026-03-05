@@ -511,30 +511,46 @@ async def download_email_attachment(user_id: int, message_id: str, attachment_id
         return base64.urlsafe_b64decode(data + "==")
 
 
+def _expediente_a_fila(expediente: dict) -> list:
+    """Convierte un expediente a fila de 14 columnas (A:N)."""
+    return [
+        expediente.get("numero_interno", ""),      # A: No
+        expediente.get("juzgado_codigo", ""),       # B: Código
+        expediente.get("juzgado", ""),              # C: Juzgado
+        expediente.get("numero", ""),               # D: Expediente
+        expediente.get("partes", "") or expediente.get("cliente", ""),  # E: Partes
+        expediente.get("monto", ""),                # F: Monto
+        expediente.get("estado", "activo"),         # G: Estado
+        expediente.get("ultimo_acuerdo", ""),       # H: Último Acuerdo
+        expediente.get("ultimo_acuerdo_texto", ""), # I: Texto Acuerdo
+        expediente.get("proximo_paso", ""),         # J: Próximo Paso
+        expediente.get("proximo_termino", ""),      # K: Próx. Término
+        "SÍ" if expediente.get("termino_fatal") else "NO",  # L: Fatal
+        expediente.get("notas", ""),                # M: Notas
+        expediente.get("domicilio_demandado", ""),  # N: Domicilio
+    ]
+
+
+async def _get_sheet_id(user_id: int) -> str:
+    """Lee el spreadsheet ID: primero de DB, luego de env var."""
+    import memory as _memory
+    sheet_id = _memory.get_sheets_id(user_id)
+    if not sheet_id:
+        sheet_id = os.getenv("SHEETS_EXPEDIENTES_ID", "")
+    return sheet_id
+
+
 async def update_sheets_expediente(user_id: int, expediente: dict) -> None:
     """
-    Actualiza la fila de un expediente en Google Sheets.
-    Requiere que expediente tenga 'sheets_row' (número de fila, ej: 2).
-    Columnas A-L según estructura definida en el plan.
+    Actualiza la fila de un expediente en Google Sheets (A:N, 14 columnas).
+    Requiere que expediente tenga 'sheets_row'.
     """
-    sheet_id = os.getenv("SHEETS_EXPEDIENTES_ID", "")
+    sheet_id = await _get_sheet_id(user_id)
+    if not sheet_id:
+        return
     row = expediente.get("sheets_row", 2)
-    range_name = f"A{row}:L{row}"
-
-    values = [[
-        expediente.get("numero", ""),
-        expediente.get("juzgado", ""),
-        expediente.get("cliente", ""),
-        expediente.get("tipo", ""),
-        expediente.get("etapa", ""),
-        expediente.get("ultimo_acuerdo", ""),
-        expediente.get("ultimo_acuerdo_texto", ""),
-        expediente.get("proximo_termino", ""),
-        "SÍ" if expediente.get("termino_fatal") else "NO",
-        expediente.get("estado", "activo"),
-        expediente.get("notas", ""),
-        expediente.get("ultima_actualizacion", ""),
-    ]]
+    range_name = f"Expedientes!A{row}:N{row}"
+    values = [_expediente_a_fila(expediente)]
 
     token = await get_valid_token(user_id)
     async with httpx.AsyncClient() as client:
@@ -552,23 +568,9 @@ async def append_sheets_expediente(user_id: int, expediente: dict) -> int:
     Agrega un expediente como nueva fila en Google Sheets.
     Retorna el número de fila asignado.
     """
-    sheet_id = os.getenv("SHEETS_EXPEDIENTES_ID", "")
-    range_name = os.getenv("SHEETS_EXPEDIENTES_RANGE", "Expedientes!A:L")
-
-    values = [[
-        expediente.get("numero", ""),
-        expediente.get("juzgado", ""),
-        expediente.get("cliente", ""),
-        expediente.get("tipo", ""),
-        expediente.get("etapa", ""),
-        expediente.get("ultimo_acuerdo", ""),
-        expediente.get("ultimo_acuerdo_texto", ""),
-        expediente.get("proximo_termino", ""),
-        "SÍ" if expediente.get("termino_fatal") else "NO",
-        expediente.get("estado", "activo"),
-        expediente.get("notas", ""),
-        expediente.get("ultima_actualizacion", ""),
-    ]]
+    sheet_id = await _get_sheet_id(user_id)
+    range_name = os.getenv("SHEETS_EXPEDIENTES_RANGE", "Expedientes!A:N")
+    values = [_expediente_a_fila(expediente)]
 
     token = await get_valid_token(user_id)
     async with httpx.AsyncClient() as client:
@@ -581,12 +583,129 @@ async def append_sheets_expediente(user_id: int, expediente: dict) -> int:
         r.raise_for_status()
         result = r.json()
 
-    # Extraer número de fila del rango actualizado
     updated_range = result.get("updates", {}).get("updatedRange", "")
     try:
-        # Formato: "Expedientes!A3:L3" → extraer 3
         row_part = updated_range.split("!")[1] if "!" in updated_range else updated_range
         row_num = int("".join(filter(str.isdigit, row_part.split(":")[0])))
     except Exception:
         row_num = 2
     return row_num
+
+
+async def create_spreadsheet(user_id: int, title: str) -> str:
+    """
+    Crea un nuevo Google Spreadsheet con 3 hojas: Expedientes, Pendientes, Términos.
+    Retorna el spreadsheet_id.
+    """
+    token = await get_valid_token(user_id)
+    body = {
+        "properties": {"title": title},
+        "sheets": [
+            {"properties": {"title": "Expedientes", "index": 0}},
+            {"properties": {"title": "Pendientes",  "index": 1}},
+            {"properties": {"title": "Términos",    "index": 2}},
+        ],
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://sheets.googleapis.com/v4/spreadsheets",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+        )
+        r.raise_for_status()
+        return r.json()["spreadsheetId"]
+
+
+async def setup_sheets_for_user(user_id: int) -> str:
+    """
+    Crea y pre-pobla el Google Spreadsheet de control de expedientes.
+
+    1. Crea spreadsheet "Tato Bot — Control de Expedientes"
+    2. Escribe headers en las 3 hojas
+    3. Carga todos los expedientes de DB → hoja Expedientes
+    4. Carga pendientes activos → hoja Pendientes
+    5. Carga términos → hoja Términos
+    6. Guarda el spreadsheet_id en DB
+    7. Retorna spreadsheet_id
+    """
+    import logging
+    import memory as _memory
+
+    logger = logging.getLogger(__name__)
+
+    # 1. Crear spreadsheet
+    logger.info("[sheets] Creando spreadsheet para user_id=%s", user_id)
+    sheet_id = await create_spreadsheet(user_id, "Tato Bot — Control de Expedientes")
+    logger.info("[sheets] Spreadsheet creado: %s", sheet_id)
+
+    token = await get_valid_token(user_id)
+
+    # Headers por hoja
+    headers_expedientes = [[
+        "No", "Cód", "Juzgado", "Expediente", "Partes", "Monto", "Estado",
+        "Últ. Acuerdo", "Texto Acuerdo", "Próximo Paso",
+        "Próx. Término", "Fatal", "Notas", "Domicilio",
+    ]]
+    headers_pendientes = [["Juzgado", "Expediente", "Fecha", "Último Acuerdo", "Pendiente (Nota)"]]
+    headers_terminos   = [["Expediente", "Juzgado", "Tipo", "Fecha Vence", "Fatal", "Resuelto"]]
+
+    # 2. Escribir headers y datos en batch
+    expedientes = _memory.get_expedientes_sync(user_id)
+    terminos    = _memory.get_terminos_sync(user_id)
+
+    # Filas expedientes
+    filas_exp = [_expediente_a_fila(e) for e in expedientes]
+
+    # Filas pendientes: expedientes con proximo_paso
+    filas_pend = []
+    for e in expedientes:
+        if e.get("proximo_paso") or e.get("estado") == "activo":
+            filas_pend.append([
+                e.get("juzgado", ""),
+                e.get("numero", ""),
+                e.get("ultimo_acuerdo", ""),
+                e.get("ultimo_acuerdo_texto", "")[:200] if e.get("ultimo_acuerdo_texto") else "",
+                e.get("proximo_paso", ""),
+            ])
+
+    # Filas términos
+    filas_term = []
+    for t in terminos:
+        filas_term.append([
+            t.get("expediente_numero", ""),
+            t.get("juzgado", ""),
+            t.get("tipo", ""),
+            t.get("vence", ""),
+            "SÍ" if t.get("fatal") else "NO",
+            "SÍ" if t.get("resuelto") else "NO",
+        ])
+
+    # batchUpdate con valueRanges
+    value_ranges = [
+        {"range": "Expedientes!A1",  "values": headers_expedientes + filas_exp},
+        {"range": "Pendientes!A1",   "values": headers_pendientes + filas_pend},
+        {"range": "Términos!A1",     "values": headers_terminos + filas_term},
+    ]
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchUpdate",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"valueInputOption": "USER_ENTERED", "data": value_ranges},
+        )
+        r.raise_for_status()
+
+    logger.info(
+        "[sheets] %d expedientes, %d pendientes, %d términos cargados",
+        len(filas_exp), len(filas_pend), len(filas_term)
+    )
+
+    # 3. Actualizar sheets_row en DB para cada expediente (fila = idx + 2, header en fila 1)
+    for i, exp in enumerate(expedientes):
+        exp["sheets_row"] = i + 2
+    _memory.save_expedientes_sync(user_id, expedientes)
+
+    # 4. Guardar sheet_id en DB
+    _memory.save_sheets_id(user_id, sheet_id)
+
+    return sheet_id

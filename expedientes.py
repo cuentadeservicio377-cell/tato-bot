@@ -55,6 +55,12 @@ async def add_expediente(db_pool, user_id: int, expediente: dict) -> dict:
     expedientes = await get_expedientes(db_pool, user_id)
     expediente["id"] = str(uuid.uuid4())
     expediente.setdefault("estado", "activo")
+    expediente.setdefault("juzgado_codigo", "")
+    expediente.setdefault("partes", "")
+    expediente.setdefault("monto", "")
+    expediente.setdefault("domicilio_demandado", "")
+    expediente.setdefault("numero_interno", "")
+    expediente.setdefault("proximo_paso", "")
     expediente["ultima_actualizacion"] = datetime.now().isoformat()
     expedientes.append(expediente)
     await save_expedientes(db_pool, user_id, expedientes)
@@ -95,12 +101,17 @@ async def format_expedientes_list(expedientes: list) -> str:
 
     lines = [f"*Expedientes activos ({len(expedientes)}):*\n"]
     for exp in expedientes:
-        termino = exp.get("proximo_termino", "—")
+        termino   = exp.get("proximo_termino", "—")
         fatal_tag = " ⚠️ FATAL" if exp.get("termino_fatal") else ""
-        etapa = exp.get("etapa", "—")
+        # Preferir partes sobre cliente si está disponible
+        partes = exp.get("partes") or exp.get("cliente", "?")
+        if len(partes) > 60:
+            partes = partes[:57] + "..."
+        proximo = exp.get("proximo_paso", "")
+        proximo_line = f"\n  Pendiente: {proximo[:70]}" if proximo else ""
         lines.append(
             f"• *{exp.get('numero', '?')}* — {exp.get('juzgado', '?')}\n"
-            f"  Cliente: {exp.get('cliente', '?')} | Etapa: {etapa}\n"
-            f"  Próximo término: {termino}{fatal_tag}"
+            f"  {partes}\n"
+            f"  Próximo término: {termino}{fatal_tag}{proximo_line}"
         )
     return "\n\n".join([lines[0]] + lines[1:])

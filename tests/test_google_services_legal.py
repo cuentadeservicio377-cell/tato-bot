@@ -91,12 +91,12 @@ async def test_update_sheets_expediente_calls_put():
     }
 
     with patch("google_services.get_valid_token", new_callable=AsyncMock, return_value="fake-token"), \
-         patch.dict(os.environ, {"SHEETS_EXPEDIENTES_ID": FAKE_SHEET_ID}):
+         patch("google_services._get_sheet_id", new_callable=AsyncMock, return_value=FAKE_SHEET_ID):
 
         with patch("httpx.AsyncClient") as MockClient:
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
-            mock_resp.json = MagicMock(return_value={"updatedCells": 12})
+            mock_resp.json = MagicMock(return_value={"updatedCells": 14})
 
             mock_client_instance = AsyncMock()
             mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
@@ -109,7 +109,7 @@ async def test_update_sheets_expediente_calls_put():
             mock_client_instance.put.assert_called_once()
             call_url = mock_client_instance.put.call_args[0][0]
             assert FAKE_SHEET_ID in call_url
-            assert "A2:L2" in call_url
+            assert "A2:N2" in call_url
 
 
 @pytest.mark.asyncio
@@ -126,16 +126,14 @@ async def test_append_sheets_expediente_calls_post():
     }
 
     with patch("google_services.get_valid_token", new_callable=AsyncMock, return_value="fake-token"), \
-         patch.dict(os.environ, {
-             "SHEETS_EXPEDIENTES_ID": FAKE_SHEET_ID,
-             "SHEETS_EXPEDIENTES_RANGE": "Expedientes!A:L"
-         }):
+         patch("google_services._get_sheet_id", new_callable=AsyncMock, return_value=FAKE_SHEET_ID), \
+         patch.dict(os.environ, {"SHEETS_EXPEDIENTES_RANGE": "Expedientes!A:N"}):
 
         with patch("httpx.AsyncClient") as MockClient:
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
             mock_resp.json = MagicMock(return_value={
-                "updates": {"updatedRange": "Expedientes!A3:L3"}
+                "updates": {"updatedRange": "Expedientes!A3:N3"}
             })
 
             mock_client_instance = AsyncMock()
