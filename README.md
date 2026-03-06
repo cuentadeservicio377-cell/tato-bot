@@ -11,7 +11,7 @@
    ╚═╝   ╚═╝  ╚═╝   ╚═╝    ╚═════╝       ╚═════╝  ╚═════╝    ╚═╝
 ```
 
-**Asistente legal personal de Juan José Narváez Palacios**
+**Asistente legal personal**
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Groq](https://img.shields.io/badge/Groq-LLaMA_3.3_70B_+_Whisper-F55036?style=flat-square)](https://groq.com)
@@ -320,6 +320,6 @@ pytest tests/ -v
 
 **Tato Bot v1.0** · Fork de [monday-bot](https://github.com/ProfessorArmitage/monday-bot) · Python 3.12 · Groq · Railway
 
-*Construido para la práctica legal de Juan José Narváez Palacios — Guadalajara, México*
+*Construido para la práctica legal de un abogado litigante — Guadalajara, México*
 
 </div>
